@@ -1,0 +1,10 @@
+{
+  "name": "servidor-sillas",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.2"
+  }
+}
