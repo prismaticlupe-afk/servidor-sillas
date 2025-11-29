@@ -1,14 +1,11 @@
+
 const http = require("http");
 const { Server } = require("socket.io");
 
 const httpServer = http.createServer((req, res) => {
-  res.write("Servidor Sillas Locas - ACTIVO");
+  res.write("Servidor Sillas Locas (Multiplayer V2) - ACTIVO");
   res.end();
 });
-
-// Almacén de estado de jugadores en el servidor
-// Formato: { socketId: { room, id, name, modelUrl, x, y, z, rot, action } }
-let serverPlayers = {};
 
 const io = new Server(httpServer, {
   cors: {
@@ -17,70 +14,126 @@ const io = new Server(httpServer, {
   }
 });
 
+// === ESTADO DEL SERVIDOR ===
+let players = {}; // Datos de jugadores: { socketId: { room, name, modelUrl, ... } }
+let rooms = {};   // Datos de salas: { roomId: { name, hostId, playerCount } }
+
 io.on("connection", (socket) => {
-  console.log("Jugador conectado:", socket.id);
+  console.log("Nuevo jugador conectado:", socket.id);
 
-  // 1. Unirse a sala
-  socket.on("JOIN_ROOM", ({ room, player }) => {
-    socket.join(room);
+  // 1. ENVIAR LISTA DE SALAS (Para el menú "Unirse")
+  socket.on("get_rooms", () => {
+    const roomList = [];
+    for (const [id, info] of Object.entries(rooms)) {
+      roomList.push({ id: id, name: info.name, players: info.playerCount });
+    }
+    socket.emit("room_list_update", roomList);
+  });
 
-    // Guardar jugador en memoria del servidor con posición inicial
-    serverPlayers[socket.id] = { 
-        ...player, 
-        room, 
-        x: 0, y: 0, z: 0, rot: 0, action: 'idle' 
+  // 2. CREAR SALA
+  socket.on("create_room", (data) => {
+    const roomId = Math.floor(Math.random() * 9000 + 1000).toString(); // ID de 4 dígitos
+    
+    rooms[roomId] = {
+      name: data.roomName || `Sala ${roomId}`,
+      hostId: socket.id,
+      playerCount: 1
     };
 
-    // A) Notificar a los demás que alguien entró
-    socket.to(room).emit("PLAYER_JOINED", player);
-
-    // B) [CORRECCIÓN] Enviar al NUEVO jugador la lista de los que ya están
-    // Filtramos para enviar solo los de esta sala y que no sea él mismo
-    const playersInRoom = Object.values(serverPlayers).filter(p => p.room === room && p.id !== player.id);
-    socket.emit("CURRENT_PLAYERS", playersInRoom);
+    joinRoomLogic(socket, roomId, data.playerName, data.modelUrl);
   });
 
-  // 2. Movimiento
-  socket.on("UPDATE_POS", (data) => {
-    // Actualizar la memoria del servidor
-    if (serverPlayers[socket.id]) {
-        Object.assign(serverPlayers[socket.id], {
-            x: data.x, 
-            y: data.y, 
-            z: data.z, 
-            rot: data.rot, 
-            action: data.action 
-        });
+  // 3. UNIRSE A SALA
+  socket.on("join_room", (data) => {
+    if (rooms[data.roomId]) {
+      // Verificar si está llena (Max 8)
+      if(rooms[data.roomId].playerCount >= 8) {
+        // Opcional: Emitir error si está llena
+        return;
+      }
+      rooms[data.roomId].playerCount++;
+      joinRoomLogic(socket, data.roomId, data.playerName, data.modelUrl);
     }
-    // Reenviar a los demás
-    socket.to(data.room).emit("UPDATE_POS", data);
   });
 
-  // 3. Eventos del juego (Sillas)
-  socket.on("GAME_EVENT", (data) => {
-    io.in(data.room).emit("GAME_EVENT", data);
+  // Lógica común para unirse (guardar datos y avisar)
+  function joinRoomLogic(socket, roomId, name, modelUrl) {
+    socket.join(roomId);
+
+    // Guardar datos del jugador
+    players[socket.id] = {
+      id: socket.id,
+      room: roomId,
+      name: name,
+      modelUrl: modelUrl,
+      x: 0, y: 0, z: 0, rot: 0, action: 'idle'
+    };
+
+    // A) Enviar al jugador la lista de quienes YA están en la sala
+    const playersInRoom = Object.values(players).filter(p => p.room === roomId);
+    socket.emit("room_joined_success", playersInRoom);
+
+    // B) Avisar a los demás que entró alguien nuevo
+    socket.to(roomId).emit("player_joined_room", players[socket.id]);
+    
+    console.log(`Jugador ${name} entró a la sala ${roomId}`);
+  }
+
+  // 4. MOVIMIENTO Y POSICIÓN
+  socket.on("update_transform", (data) => {
+    const p = players[socket.id];
+    if (p) {
+      // Actualizar memoria
+      p.x = data.x; p.y = data.y; p.z = data.z; p.rot = data.rot; p.action = data.action;
+      // Reenviar a la sala (menos a uno mismo)
+      socket.to(p.room).emit("update_player_transform", { id: socket.id, ...data });
+    }
   });
 
-  // 4. Chat
-  socket.on("CHAT_MESSAGE", (data) => {
-    io.in(data.room).emit("CHAT_MESSAGE", data);
+  // 5. ACCIONES DEL HOST (Iniciar juego, eliminar, sillas)
+  socket.on("host_action", (data) => {
+    const p = players[socket.id];
+    if (p && rooms[p.room] && rooms[p.room].hostId === socket.id) {
+      // Si es el host, reenviamos el evento a TODOS en la sala
+      io.in(p.room).emit("game_event", data);
+    }
   });
 
-  // 5. Desconexión
+  // 6. CHAT
+  socket.on("chat_msg", (data) => {
+    const p = players[socket.id];
+    if (p) {
+      io.in(p.room).emit("chat_msg_global", data);
+    }
+  });
+
+  // 7. DESCONEXIÓN
   socket.on("disconnect", () => {
-    console.log("Jugador desconectado:", socket.id);
-    if (serverPlayers[socket.id]) {
-        const { room, id } = serverPlayers[socket.id];
-        // Avisar a la sala para borrar el avatar
-        io.in(room).emit("PLAYER_LEFT", id);
-        // Borrar de memoria
-        delete serverPlayers[socket.id];
+    const p = players[socket.id];
+    if (p) {
+      const roomId = p.room;
+      
+      // Avisar a la sala
+      io.in(roomId).emit("player_left_room", socket.id);
+      
+      // Actualizar contador de sala
+      if (rooms[roomId]) {
+        rooms[roomId].playerCount--;
+        if (rooms[roomId].playerCount <= 0) {
+          delete rooms[roomId]; // Borrar sala si está vacía
+        } else if (rooms[roomId].hostId === socket.id) {
+            // (Opcional) Asignar nuevo host si el host se va
+            // Por ahora simple: si el host se va, la sala sigue pero sin control
+        }
+      }
+
+      delete players[socket.id];
+      console.log("Jugador desconectado:", socket.id);
     }
   });
-
 });
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
-    console.log(`Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor Sillas Locas corriendo en puerto ${PORT}`);
 });
