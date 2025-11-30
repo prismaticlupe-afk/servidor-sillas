@@ -1,4 +1,3 @@
-
 const http = require("http");
 const { Server } = require("socket.io");
 
@@ -9,7 +8,14 @@ const httpServer = http.createServer((req, res) => {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: "*", 
+    // === INICIO DEL CAMBIO DE SEGURIDAD ===
+    // En lugar de "*", ponemos un array con tus dominios permitidos:
+    origin: [
+        "https://zaraprueba.unaux.com",
+        "http://zaraprueba.unaux.com",
+        "https://www.zaraprueba.unaux.com"
+    ],
+    // === FIN DEL CAMBIO DE SEGURIDAD ===
     methods: ["GET", "POST"]
   }
 });
